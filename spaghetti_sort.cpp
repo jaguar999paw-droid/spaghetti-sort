@@ -20,6 +20,12 @@
  *   - On wake, the thread pushes its value into a shared output vector.
  *   - Result: values arrive in ascending order — sorted!
  *
+ * DUPLICATE HANDLING (fixes #1):
+ *   When two strands have equal length, both threads sleep the same duration
+ *   and wake at approximately the same time — OS scheduling determines which
+ *   appends first. We add a tiny sub-millisecond jitter seeded from thread ID
+ *   to break ties deterministically without meaningfully affecting sort order.
+ *
  * COMPLEXITY (this simulation):
  *   Time:  O(max_value) — bounded by the longest sleep, not n
  *   Space: O(n)         — one thread per element
@@ -35,12 +41,17 @@
 #include <chrono>
 #include <algorithm>
 #include <random>
+#include <functional>  // std::hash
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 // Each unit of value = this many milliseconds of sleep.
 // Lower = faster simulation; higher = more visually obvious timing gaps.
 constexpr int TIME_UNIT_MS = 20;
+
+// Maximum microsecond jitter added to break ties between equal-value threads.
+// Must be much less than TIME_UNIT_MS * 1000 to preserve sort order.
+constexpr int TIE_BREAK_JITTER_US = 500;  // 0.5 ms max — safe for TIME_UNIT_MS >= 5
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
 
@@ -58,17 +69,26 @@ std::mutex output_mutex;          // Guards sorted_output from concurrent writes
  * into sorted_output earlier — exactly as a shorter physical strand would be
  * "picked last" when sweeping from the top (we collect in ascending order here).
  *
- * @param value  The numeric value this strand represents
+ * For duplicate values, a tiny deterministic jitter (derived from thread ID)
+ * is added so equal-valued strands don't race for the mutex. This fixes #1.
+ *
+ * @param value     The numeric value this strand represents
+ * @param strand_id Unique index of this strand in the original input (for jitter)
  */
-void strand_thread(int value) {
+void strand_thread(int value, size_t strand_id) {
     // ── Step 1: "Stand upright" ──────────────────────────────────────────────
-    // Sleep duration is proportional to the strand's length (value).
-    // This is the gravity simulation: all threads start simultaneously,
-    // but shorter ones finish sleeping first.
+    // Primary sleep: proportional to value (this IS the sort key).
     std::this_thread::sleep_for(std::chrono::milliseconds(value * TIME_UNIT_MS));
 
+    // ── Step 1b: Tie-breaking jitter (fix for #1) ────────────────────────────
+    // For equal values, add a sub-millisecond offset derived from strand_id
+    // so threads don't all hammer the mutex at exactly the same instant.
+    // The jitter is tiny compared to TIME_UNIT_MS so it cannot change order.
+    size_t jitter_us = (std::hash<size_t>{}(strand_id) % TIE_BREAK_JITTER_US);
+    std::this_thread::sleep_for(std::chrono::microseconds(jitter_us));
+
     // ── Step 2: "Hand touches this strand" ──────────────────────────────────
-    // The thread woke up, meaning it's the shortest remaining strand.
+    // The thread woke up — it's the shortest remaining strand.
     // Safely append to the shared sorted result.
     {
         std::lock_guard<std::mutex> lock(output_mutex);
@@ -98,9 +118,10 @@ std::vector<int> spaghetti_sort(const std::vector<int>& input) {
     std::cout << "\n[spaghetti_sort] Dropping " << input.size()
               << " strands onto the table...\n";
 
-    for (int val : input) {
-        // Each strand gets its own thread, sleeping proportionally to its value
-        threads.emplace_back(strand_thread, val);
+    for (size_t i = 0; i < input.size(); ++i) {
+        // Each strand gets its own thread, sleeping proportionally to its value.
+        // strand_id (i) is passed so equal-valued strands get unique jitter.
+        threads.emplace_back(strand_thread, input[i], i);
     }
 
     // ── Step 2: "Wait for all strands to fall" ───────────────────────────────
@@ -140,12 +161,9 @@ int main() {
     // ── Test 1: Small hand-crafted input ────────────────────────────────────
     {
         std::vector<int> data = {8, 3, 7, 1, 5, 2, 9, 4, 6};
-
         std::cout << "\n── Test 1: Hand-crafted input ──\n";
         print_vec("Input ", data);
-
         auto result = spaghetti_sort(data);
-
         print_vec("Output", result);
         std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
     }
@@ -153,12 +171,9 @@ int main() {
     // ── Test 2: Already sorted ───────────────────────────────────────────────
     {
         std::vector<int> data = {1, 2, 3, 4, 5};
-
         std::cout << "\n── Test 2: Already sorted input ──\n";
         print_vec("Input ", data);
-
         auto result = spaghetti_sort(data);
-
         print_vec("Output", result);
         std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
     }
@@ -166,12 +181,9 @@ int main() {
     // ── Test 3: Reverse sorted ───────────────────────────────────────────────
     {
         std::vector<int> data = {10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
-
         std::cout << "\n── Test 3: Reverse sorted input ──\n";
         print_vec("Input ", data);
-
         auto result = spaghetti_sort(data);
-
         print_vec("Output", result);
         std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
     }
@@ -180,15 +192,31 @@ int main() {
     {
         std::mt19937 rng(42);
         std::uniform_int_distribution<int> dist(1, 15);
-
         std::vector<int> data(12);
         std::generate(data.begin(), data.end(), [&]() { return dist(rng); });
-
         std::cout << "\n── Test 4: Random input (seed=42) ──\n";
         print_vec("Input ", data);
-
         auto result = spaghetti_sort(data);
+        print_vec("Output", result);
+        std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
+    }
 
+    // ── Test 5: All duplicates (regression test for #1) ─────────────────────
+    {
+        std::vector<int> data = {5, 5, 5, 5, 5};
+        std::cout << "\n── Test 5: All duplicates (regression for #1) ──\n";
+        print_vec("Input ", data);
+        auto result = spaghetti_sort(data);
+        print_vec("Output", result);
+        std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
+    }
+
+    // ── Test 6: Mixed duplicates ─────────────────────────────────────────────
+    {
+        std::vector<int> data = {4, 2, 4, 1, 2, 3, 1};
+        std::cout << "\n── Test 6: Mixed duplicates ──\n";
+        print_vec("Input ", data);
+        auto result = spaghetti_sort(data);
         print_vec("Output", result);
         std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
     }
