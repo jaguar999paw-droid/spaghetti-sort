@@ -1,0 +1,21 @@
+# CMake build artefacts
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled binary
+spaghetti_sort
+spaghetti_sort.exe
+
+# IDE / editor noise
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
