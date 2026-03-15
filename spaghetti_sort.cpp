@@ -1,3 +1,4 @@
+// Author: PAUL WAMBUGU | Reg No: EB3/61578/22
 // spaghetti_sort.cpp — Simulates Spaghetti Sort using threads (each sleeps proportionally to its value)
 
 #include <iostream>
