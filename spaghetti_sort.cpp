@@ -1,130 +1,88 @@
-// Author: PAUL WAMBUGU | Reg No: EB3/61578/22
-// spaghetti_sort.cpp — Simulates Spaghetti Sort using threads (each sleeps proportionally to its value)
+// spaghetti_sort.cpp
+//
+// Simulates the Spaghetti Sort algorithm using C++ threads.
+//
+// The idea (physical analogy):
+//   - Represent each number as a spaghetti strand cut to that length.
+//   - Drop all strands on a table at once, then pick them up shortest-first.
+//   - Here, each number becomes a thread that sleeps for (value × MS_PER_UNIT)
+//     milliseconds. Shorter values wake up first and record themselves — producing
+//     a sorted sequence without any comparison.
+//
+// Time complexity:  O(max_value)  — determined by the largest number, not n.
+// Space complexity: O(n)          — one thread per element.
+//
+// Author: Paul Wambugu | Reg No: EB3/61578/22
 
 #include <iostream>
 #include <vector>
 #include <thread>
 #include <mutex>
 #include <chrono>
-#include <algorithm>
-#include <random>
-#include <functional>
+#include <algorithm>   // is_sorted, generate
+#include <random>      // mt19937, uniform_int_distribution
 
-// TIME_UNIT_MS: sleep duration per value unit. TIE_BREAK_JITTER_US: sub-ms offset for equal values.
-constexpr int TIME_UNIT_MS = 20;
-constexpr int TIE_BREAK_JITTER_US = 500;
+using namespace std;
 
-std::vector<int> sorted_output;
-std::mutex output_mutex;
+// Scale factor: 1 unit of value = how many milliseconds of sleep
+const int MS_PER_UNIT = 20;
 
-// Each thread sleeps for (value * TIME_UNIT_MS) ms, then appends to sorted_output — shorter sleeps = smaller values arrive first.
-void strand_thread(int value, size_t strand_id) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(value * TIME_UNIT_MS));
-    size_t jitter_us = (std::hash<size_t>{}(strand_id) % TIE_BREAK_JITTER_US);
-    std::this_thread::sleep_for(std::chrono::microseconds(jitter_us));
-    std::lock_guard<std::mutex> lock(output_mutex);
+vector<int> sorted_output;   // threads append here as they finish
+mutex output_lock;           // protects sorted_output from race conditions
+
+// Each strand sleeps proportional to its value, then records itself.
+// The tiny (id % 500) microsecond offset breaks ties among equal values.
+void strand(int value, int id) {
+    this_thread::sleep_for(chrono::milliseconds(value * MS_PER_UNIT));
+    this_thread::sleep_for(chrono::microseconds(id % 500));  // tie-break
+    lock_guard<mutex> lock(output_lock);
     sorted_output.push_back(value);
 }
 
-// Spawns one thread per element simultaneously; joins all threads; returns values in ascending order.
-std::vector<int> spaghetti_sort(const std::vector<int>& input) {
+// Spawn one thread per element, wait for all to finish, return sorted result.
+vector<int> spaghetti_sort(const vector<int>& input) {
     sorted_output.clear();
-    std::vector<std::thread> threads;
-    threads.reserve(input.size());
+    vector<thread> threads;
 
-    std::cout << "\n[spaghetti_sort] Dropping " << input.size() << " strands onto the table...\n";
-
-    for (size_t i = 0; i < input.size(); ++i)
-        threads.emplace_back(strand_thread, input[i], i);
+    for (int i = 0; i < (int)input.size(); i++)
+        threads.emplace_back(strand, input[i], i);
 
     for (auto& t : threads)
-        t.join();
+        t.join();   // block until every strand has reported in
 
-    std::cout << "[spaghetti_sort] All strands collected. Sorting complete.\n\n";
     return sorted_output;
 }
 
-void print_vec(const std::string& label, const std::vector<int>& v) {
-    std::cout << label << ": [ ";
-    for (int x : v) std::cout << x << " ";
-    std::cout << "]\n";
+// Helper: print a labelled vector on one line
+void print_vec(const string& label, const vector<int>& v) {
+    cout << label << ": ";
+    for (int x : v) cout << x << " ";
+    cout << "\n";
 }
 
-bool is_sorted_asc(const std::vector<int>& v) {
-    return std::is_sorted(v.begin(), v.end());
+// Helper: run one test case and report pass/fail
+void run_test(const string& name, vector<int> data) {
+    cout << "-- " << name << " --\n";
+    print_vec("Input ", data);
+    vector<int> result = spaghetti_sort(data);
+    print_vec("Output", result);
+    bool ok = is_sorted(result.begin(), result.end());
+    cout << "Sorted correctly: " << (ok ? "YES" : "NO") << "\n\n";
 }
 
 int main() {
-    std::cout << "╔══════════════════════════════════════════╗\n";
-    std::cout << "║        🍝  Spaghetti Sort Demo           ║\n";
-    std::cout << "╚══════════════════════════════════════════╝\n";
+    // Test 1: General unsorted input
+    run_test("General case", {8, 3, 7, 1, 5, 2, 9, 4, 6});
 
-    // Test 1: Hand-crafted input
-    {
-        std::vector<int> data = {8, 3, 7, 1, 5, 2, 9, 4, 6};
-        std::cout << "\n── Test 1: Hand-crafted input ──\n";
-        print_vec("Input ", data);
-        auto result = spaghetti_sort(data);
-        print_vec("Output", result);
-        std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
-    }
+    // Test 2: Duplicate values — exercises the tie-break logic
+    run_test("Duplicates", {4, 2, 4, 1, 2, 3, 1});
 
-    // Test 2: Already sorted
-    {
-        std::vector<int> data = {1, 2, 3, 4, 5};
-        std::cout << "\n── Test 2: Already sorted input ──\n";
-        print_vec("Input ", data);
-        auto result = spaghetti_sort(data);
-        print_vec("Output", result);
-        std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
-    }
-
-    // Test 3: Reverse sorted
-    {
-        std::vector<int> data = {10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
-        std::cout << "\n── Test 3: Reverse sorted input ──\n";
-        print_vec("Input ", data);
-        auto result = spaghetti_sort(data);
-        print_vec("Output", result);
-        std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
-    }
-
-    // Test 4: Random input (seed=42)
-    {
-        std::mt19937 rng(42);
-        std::uniform_int_distribution<int> dist(1, 15);
-        std::vector<int> data(12);
-        std::generate(data.begin(), data.end(), [&]() { return dist(rng); });
-        std::cout << "\n── Test 4: Random input (seed=42) ──\n";
-        print_vec("Input ", data);
-        auto result = spaghetti_sort(data);
-        print_vec("Output", result);
-        std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
-    }
-
-    // Test 5: All duplicates (regression for equal-value race condition)
-    {
-        std::vector<int> data = {5, 5, 5, 5, 5};
-        std::cout << "\n── Test 5: All duplicates ──\n";
-        print_vec("Input ", data);
-        auto result = spaghetti_sort(data);
-        print_vec("Output", result);
-        std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
-    }
-
-    // Test 6: Mixed duplicates
-    {
-        std::vector<int> data = {4, 2, 4, 1, 2, 3, 1};
-        std::cout << "\n── Test 6: Mixed duplicates ──\n";
-        print_vec("Input ", data);
-        auto result = spaghetti_sort(data);
-        print_vec("Output", result);
-        std::cout << "Sorted correctly: " << (is_sorted_asc(result) ? "✅ YES" : "❌ NO") << "\n";
-    }
-
-    std::cout << "\n╔══════════════════════════════════════════╗\n";
-    std::cout << "║           All tests complete             ║\n";
-    std::cout << "╚══════════════════════════════════════════╝\n";
+    // Test 3: Random input with a fixed seed for reproducibility
+    mt19937 rng(42);
+    uniform_int_distribution<int> dist(1, 15);
+    vector<int> random_data(10);
+    generate(random_data.begin(), random_data.end(), [&]() { return dist(rng); });
+    run_test("Random (seed=42, n=10)", random_data);
 
     return 0;
 }
